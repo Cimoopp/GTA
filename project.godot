@@ -36,3 +36,16 @@ common/physics_ticks_per_second=60
 renderer/rendering_method="mobile"
 renderer/rendering_method.mobile="mobile"
 anti_aliasing/quality/msaa_3d=0
+
+[debug]
+
+; Строгие предупреждения GDScript при сборке в облаке не должны
+; останавливать экспорт APK (0 = игнорировать).
+gdscript/warnings/inference_on_variant=0
+gdscript/warnings/unsafe_property_access=0
+gdscript/warnings/unsafe_method_access=0
+gdscript/warnings/unsafe_cast=0
+gdscript/warnings/unsafe_call_argument=0
+gdscript/warnings/unsafe_void_return=0
+gdscript/warnings/untyped_declaration=0
+gdscript/warnings/return_value_discarded=0
