@@ -1,23 +1,27 @@
-; Конфигурация проекта Mini GTA (Godot 4)
-; Открывается в Godot 4.3+: «Импорт» → выбрать эту папку → Import & Edit.
-
+; Настройки проекта "Mini GTA" (Godot 4.3+)
+; Игра собирается в APK для Android.
 config_version=5
 
 [application]
 
 config/name="Mini GTA"
-config/description="Мини-GTA для Android: город, машины, пешеходы, стрельба."
+config/description="3D мини-GTA: ходьба, машины, стрельба, пешеходы, миникарта"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.3", "Mobile")
 
 [display]
 
+; Базовое разрешение интерфейса (масштабируется под любой экран)
 window/size/viewport_width=1280
 window/size/viewport_height=720
-window/handheld/orientation=0
+; Экран телефона строго горизонтально (1 = landscape)
+window/handheld/orientation=1
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [input_devices]
 
+; Касание работает как мышь (для отладки на телефоне)
 pointing/emulate_mouse_from_touch=true
 
 [physics]
@@ -26,5 +30,6 @@ common/physics_ticks_per_second=60
 
 [rendering]
 
+; Мобильный рендерер — быстрее и легче для Android
 renderer/rendering_method="mobile"
 anti_aliasing/quality/msaa_3d=0
