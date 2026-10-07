@@ -8,6 +8,7 @@ config/name="Mini GTA"
 config/description="3D мини-GTA: ходьба, машины, стрельба, пешеходы, миникарта"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.3", "Mobile")
+config/icon="res://icon.svg"
 
 [display]
 
@@ -21,8 +22,9 @@ window/stretch/aspect="expand"
 
 [input_devices]
 
-; Касание работает как мышь (для отладки на телефоне)
-pointing/emulate_mouse_from_touch=true
+; ВАЖНО: касания НЕ превращаем в мышь — иначе любой тап по экрану
+; считался бы выстрелом. Джойстик и кнопки работают напрямую.
+pointing/emulate_mouse_from_touch=false
 
 [physics]
 
@@ -32,4 +34,5 @@ common/physics_ticks_per_second=60
 
 ; Мобильный рендерер — быстрее и легче для Android
 renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"
 anti_aliasing/quality/msaa_3d=0
