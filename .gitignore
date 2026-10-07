@@ -1,0 +1,20 @@
+# Кэш и служебные файлы Godot — в репозиторий не нужны
+.godot/
+.import/
+export.cfg
+export_presets.cfg.bak
+*.translation
+
+# Сборки Android
+build/
+*.apk
+*.aab
+*.apk.idsig
+*.keystore
+*.jks
+
+# Файлы ОС и редакторов
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
