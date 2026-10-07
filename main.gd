@@ -22,9 +22,9 @@ const BLOCK := 20.0                 # размер одного квартала
 const GRID := 10                    # мир 10x10 кварталов (~200x200 м)
 const ROAD_W := 7.0                 # ширина дороги (м)
 const WORLD_SIZE := GRID * BLOCK    # полный размер мира (200 м)
-const WORLD_HALF := WORLD_SIZE / 2.0
+const EDGE_LIMIT := WORLD_SIZE / 2.0 - 4.0   # граница для разворота ИИ-машин
 
-var player: PlayerBody              # ссылка на игрока
+var player = null                   # ссылка на игрока (создаётся ниже)
 
 
 func _ready() -> void:
@@ -35,7 +35,7 @@ func _ready() -> void:
     _build_buildings()     # здания-коробки в кварталах
     _build_props()         # деревья и фонари
     _spawn_player()        # игрок
-    _spawn_cars()          # машины (парковка + ИИ-движение)
+    _spawn_cars()          # машины (движутся по дорогам)
     _spawn_peds()          # пешеходы
     _build_ui()            # здоровье, оружие, джойстик, миникарта
 
@@ -94,7 +94,7 @@ func _build_ground() -> void:
 
 
 func _build_roads() -> void:
-    # Асфальтовые полосы по границам кварталов: сетка дорог.
+    # Асфальтовые полосы по границам кварталов: получается сетка дорог.
     var road_mat := _mat(Color(0.13, 0.13, 0.15))
     for k in range(GRID + 1):
         var p := (k - GRID / 2.0) * BLOCK
@@ -121,7 +121,7 @@ func _build_roads() -> void:
 # ---------------------------- ЗДАНИЯ -----------------------------------------
 func _build_buildings() -> void:
     # В каждом квартале — здание-коробка случайной высоты и цвета.
-    # Здание вдвое ниже квартала, чтобы вокруг остались «тротуары».
+    # Здание меньше квартала, поэтому вокруг остаются «тротуары».
     var rng := RandomNumberGenerator.new()
     rng.seed = 20261007
     for i in range(GRID):
@@ -236,7 +236,7 @@ func _spawn_player() -> void:
 
 func _spawn_cars() -> void:
     # Позиция + угол поворота (машина всегда едет вперёд по своей оси -Z)
-    var spots := [
+    var spots = [
         [Vector3(1.8, 0.5, -60.0), -PI / 2.0],   # едет по +X
         [Vector3(-1.8, 0.5, 60.0), PI / 2.0],    # едет по -X
         [Vector3(60.0, 0.5, 1.8), 0.0],          # едет по -Z
@@ -302,7 +302,7 @@ class PlayerBody extends CharacterBody3D:
     var cooldown := 0.0
     var camera: Camera3D
     var cam_pitch := -0.18      # наклон камеры вверх/вниз
-    var current_car: CarBody = null
+    var current_car = null      # машина, в которой сидит игрок (или null)
     var mobile_move := Vector2.ZERO   # вектор с экранного джойстика
 
     func _ready() -> void:
@@ -352,10 +352,13 @@ class PlayerBody extends CharacterBody3D:
         return m
 
     func _input(event: InputEvent) -> void:
-        # E — вход/выход из машины (в любом состоянии)
+        # E — вход/выход из машины (работает всегда)
         if event is InputEventKey and event.pressed and not event.echo:
             if event.keycode == KEY_E:
                 toggle_car()
+                return
+            if event.keycode == KEY_SPACE and current_car == null and is_on_floor():
+                velocity.y = JUMP
                 return
 
         if current_car != null:
@@ -374,10 +377,6 @@ class PlayerBody extends CharacterBody3D:
             if event.position.x > vw * 0.6:
                 rotate_y(-event.relative.x * SENS * 1.6)
                 cam_pitch = clamp(cam_pitch - event.relative.y * SENS * 1.6, -0.85, 0.45)
-        # --- прыжок с клавиатуры ---
-        elif event is InputEventKey and event.pressed and not event.echo:
-            if event.keycode == KEY_SPACE and is_on_floor():
-                velocity.y = JUMP
 
     func _process(_delta: float) -> void:
         # Держим наклон камеры там, куда её повернул игрок
@@ -393,7 +392,7 @@ class PlayerBody extends CharacterBody3D:
         if not is_on_floor():
             velocity.y -= GRAVITY * delta
 
-        # Направление движения: клавиатура + джойстик
+        # Направление движения: клавиатура + экранный джойстик
         var ix := 0.0
         var iz := 0.0
         if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
@@ -438,7 +437,7 @@ class PlayerBody extends CharacterBody3D:
         if current_car != null:
             current_car.exit_car(self)
             return
-        var best: CarBody = null
+        var best = null
         var best_d := 5.0
         for c in get_tree().get_nodes_in_group("cars"):
             var d := global_position.distance_to(c.global_position)
@@ -448,7 +447,7 @@ class PlayerBody extends CharacterBody3D:
         if best != null:
             best.enter_car(self)
 
-    # Получение урона (наезд машины). При нуле здоровья — возрождение.
+    # Урон (например, наезд машины). При нуле здоровья — возрождение.
     func take_damage(amount: float) -> void:
         health = max(0.0, health - amount)
         if health <= 0.0:
@@ -467,9 +466,10 @@ class CarBody extends CharacterBody3D:
     const BRAKE := 26.0         # торможение
     const TURN := 1.7           # скорость поворота руля, рад/с
     const GRAVITY := 20.0
+    const EDGE := 96.0          # граница мира для разворота ИИ
 
     var speed := 0.0
-    var driver: PlayerBody = null
+    var driver = null            # игрок за рулём (или null)
     var mobile_throttle := 0.0   # газ/тормоз с экранных кнопок
     var mobile_steer := 0.0      # руль с экранных кнопок
     var hit_cd := 0.0            # задержка между наездами на игрока
@@ -510,7 +510,7 @@ class CarBody extends CharacterBody3D:
         # 4 колеса
         var wmat := StandardMaterial3D.new()
         wmat.albedo_color = Color(0.08, 0.08, 0.08)
-        var wheels := [
+        var wheels = [
             Vector3(-0.95, 0.4, 1.35), Vector3(0.95, 0.4, 1.35),
             Vector3(-0.95, 0.4, -1.35), Vector3(0.95, 0.4, -1.35)]
         for wp in wheels:
@@ -572,7 +572,7 @@ class CarBody extends CharacterBody3D:
                 speed = move_toward(speed, MAX_SPEED * 0.45, ACCEL * delta)
                 steer = 0.0
             # У края мира — разворот, чтобы машина не уехала в пустоту
-            if abs(global_position.x) > WORLD_HALF - 4.0 or abs(global_position.z) > WORLD_HALF - 4.0:
+            if abs(global_position.x) > EDGE or abs(global_position.z) > EDGE:
                 rotate_y(PI)
 
         # Поворот руля (эффективность зависит от скорости)
@@ -596,25 +596,26 @@ class CarBody extends CharacterBody3D:
 
         # Наезд на игрока уменьшает его здоровье
         if driver == null and hit_cd <= 0.0:
-            var pl := get_tree().get_first_node_in_group("player")
+            var pl = get_tree().get_first_node_in_group("player")
             if pl != null and global_position.distance_to(pl.global_position) < 3.0 and abs(speed) > 6.0:
                 pl.take_damage(30.0)
                 hit_cd = 1.5
 
     # Игрок садится за руль: его камера переезжает к машине
-    func enter_car(p: PlayerBody) -> void:
+    func enter_car(p) -> void:
         driver = p
         p.current_car = self
+        p.global_position = global_position      # прячем игрока внутри машины
         p.visible = false
         p.set_physics_process(false)
         var cam := p.camera
         cam.reparent(self, false)
-        cam.position = Vector3(0.0, 3.4, 7.5)   # камера сзади-сверху
+        cam.position = Vector3(0.0, 3.4, 7.5)    # камера сзади-сверху
         cam.rotation = Vector3(-0.25, 0.0, 0.0)
         p.cam_pitch = -0.25
 
     # Игрок выходит из машины
-    func exit_car(p: PlayerBody) -> void:
+    func exit_car(p) -> void:
         driver = null
         p.current_car = null
         speed = 0.0
@@ -634,7 +635,7 @@ class BulletBody extends Node3D:
     const LIFE := 2.0      # время жизни, с
 
     var direction := Vector3.FORWARD
-    var shooter: Node = null
+    var shooter = null
     var life := LIFE
 
     func _ready() -> void:
@@ -669,11 +670,12 @@ class BulletBody extends Node3D:
         else:
             _impact(hit.get("collider"))
 
-    func _impact(obj: Object) -> void:
-        if obj is PedBody:
-            obj.hit()                 # пешеход реагирует на выстрел
-        elif obj is CarBody:
-            obj.speed *= 0.6          # машину пуля слегка тормозит
+    func _impact(obj) -> void:
+        if obj != null and obj is Node:
+            if obj.is_in_group("peds"):
+                obj.hit()              # пешеход реагирует на выстрел
+            elif obj.is_in_group("cars"):
+                obj.speed *= 0.6       # машину пуля слегка тормозит
         queue_free()
 
 
@@ -810,7 +812,7 @@ class MiniMap extends Control:
         for p in get_tree().get_nodes_in_group("peds"):
             _dot(p.global_position, Color(0.4, 1.0, 0.4), 2.0)
         # Игрок — голубая точка
-        var pl := get_tree().get_first_node_in_group("player")
+        var pl = get_tree().get_first_node_in_group("player")
         if pl != null:
             _dot(pl.global_position, Color(0.3, 0.9, 1.0), 4.0)
 
@@ -821,7 +823,7 @@ class MiniMap extends Control:
 
 # -------------------------------- HUD ----------------------------------------
 class GameHUD extends CanvasLayer:
-    var player: PlayerBody = null
+    var player = null
     var health_bar: ProgressBar
     var weapon_label: Label
     var hint: Label
@@ -862,9 +864,9 @@ class GameHUD extends CanvasLayer:
         weapon_label.add_theme_constant_override("shadow_offset_y", 2)
         add_child(weapon_label)
 
-        # --- Подсказка управления ---
+        # --- Подсказка управления (для ПК) ---
         hint = Label.new()
-        hint.position = Vector2(20, 690)
+        hint.position = Vector2(20, 686)
         hint.text = "WASD — идти   Shift — бег   Space — прыжок   ЛКМ — огонь   E — машина"
         hint.add_theme_font_size_override("font_size", 18)
         hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
@@ -880,14 +882,14 @@ class GameHUD extends CanvasLayer:
         minimap.position = Vector2(1080, 20)
         add_child(minimap)
 
-        # --- Кнопки для пешеходного режима ---
+        # --- Кнопки пешеходного режима ---
         btn_shoot = _make_button("🔫", Vector2(1100, 380), Vector2(140, 140))
         btn_shoot.pressed.connect(_on_shoot)
 
         btn_jump = _make_button("⤒", Vector2(930, 560), Vector2(110, 110))
         btn_jump.pressed.connect(_on_jump)
 
-        # --- Кнопки для режима вождения ---
+        # --- Кнопки режима вождения ---
         btn_gas = _make_button("🚀", Vector2(1150, 400), Vector2(120, 120))
         btn_gas.button_down.connect(_on_gas_down)
         btn_gas.button_up.connect(_on_gas_up)
@@ -904,7 +906,7 @@ class GameHUD extends CanvasLayer:
         btn_right.button_down.connect(_on_right_down)
         btn_right.button_up.connect(_on_steer_up)
 
-        # --- Кнопка «в машину / из машины» (видна всегда) ---
+        # --- Кнопка «сесть в машину / выйти» (видна всегда) ---
         btn_car = _make_button("🚗", Vector2(1100, 230), Vector2(110, 110))
         btn_car.pressed.connect(_on_car)
 
@@ -927,7 +929,7 @@ class GameHUD extends CanvasLayer:
         health_bar.value = player.health
         weapon_label.text = "🔫 ∞ (перезарядка)" if player.cooldown > 0.0 else "🔫 ∞"
 
-        # Передаём джойстик игроку
+        # Передаём вектор джойстика игроку
         player.mobile_move = joy.value
 
         # Показываем нужный набор кнопок
@@ -946,8 +948,8 @@ class GameHUD extends CanvasLayer:
             player.shoot()
 
     func _on_jump() -> void:
-        if player != null and player.is_on_floor():
-            player.velocity.y = PlayerBody.JUMP
+        if player != null and player.current_car == null and player.is_on_floor():
+            player.velocity.y = 6.0     # сила прыжка
 
     func _on_car() -> void:
         if player != null:
