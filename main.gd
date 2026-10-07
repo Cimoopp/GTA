@@ -15,6 +15,11 @@ extends Node3D
 #    Джойстик слева внизу — движение, свайп справа — обзор,
 #    кнопки справа: выстрел, прыжок, машина.
 #    В машине: кнопки газ / тормоз / руль влево-вправо.
+#
+#  ВАЖНО ПРО ТИПЫ: в Godot 4 предупреждение «тип выведен из Variant»
+#  считается ошибкой при сборке. Поэтому там, где значение берётся из
+#  нетипизированного источника (например, узел из группы), тип указывается
+#  явно, а не через ":=".
 # =============================================================================
 
 # ----------------------------- НАСТРОЙКИ МИРА --------------------------------
@@ -22,7 +27,6 @@ const BLOCK := 20.0                 # размер одного квартала
 const GRID := 10                    # мир 10x10 кварталов (~200x200 м)
 const ROAD_W := 7.0                 # ширина дороги (м)
 const WORLD_SIZE := GRID * BLOCK    # полный размер мира (200 м)
-const EDGE_LIMIT := WORLD_SIZE / 2.0 - 4.0   # граница для разворота ИИ-машин
 
 var player = null                   # ссылка на игрока (создаётся ниже)
 
@@ -373,7 +377,7 @@ class PlayerBody extends CharacterBody3D:
             shoot()
         # --- обзор: свайп по правой части экрана (Android) ---
         elif event is InputEventScreenDrag:
-            var vw := get_viewport().get_visible_rect().size.x
+            var vw: float = get_viewport().get_visible_rect().size.x
             if event.position.x > vw * 0.6:
                 rotate_y(-event.relative.x * SENS * 1.6)
                 cam_pitch = clamp(cam_pitch - event.relative.y * SENS * 1.6, -0.85, 0.45)
@@ -440,7 +444,8 @@ class PlayerBody extends CharacterBody3D:
         var best = null
         var best_d := 5.0
         for c in get_tree().get_nodes_in_group("cars"):
-            var d := global_position.distance_to(c.global_position)
+            # Тип указываем явно: значение приходит из нетипизированного списка
+            var d: float = global_position.distance_to(c.global_position)
             if d < best_d:
                 best_d = d
                 best = c
@@ -608,7 +613,8 @@ class CarBody extends CharacterBody3D:
         p.global_position = global_position      # прячем игрока внутри машины
         p.visible = false
         p.set_physics_process(false)
-        var cam := p.camera
+        # Тип не выводим через ":=" — p приходит как Variant
+        var cam = p.camera
         cam.reparent(self, false)
         cam.position = Vector3(0.0, 3.4, 7.5)    # камера сзади-сверху
         cam.rotation = Vector3(-0.25, 0.0, 0.0)
@@ -619,7 +625,8 @@ class CarBody extends CharacterBody3D:
         driver = null
         p.current_car = null
         speed = 0.0
-        var cam := p.camera
+        # Тип не выводим через ":=" — p приходит как Variant
+        var cam = p.camera
         cam.reparent(p, false)
         cam.position = Vector3(0.0, 2.4, 5.0)
         cam.rotation = Vector3(p.cam_pitch, 0.0, 0.0)
@@ -856,7 +863,7 @@ class GameHUD extends CanvasLayer:
         # --- Индикатор оружия и патронов ---
         weapon_label = Label.new()
         weapon_label.position = Vector2(22, 48)
-        weapon_label.text = "🔫 ∞"
+        weapon_label.text = "Оружие: бесконечно"
         weapon_label.add_theme_font_size_override("font_size", 24)
         weapon_label.add_theme_color_override("font_color", Color(1, 1, 1))
         weapon_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
@@ -883,31 +890,31 @@ class GameHUD extends CanvasLayer:
         add_child(minimap)
 
         # --- Кнопки пешеходного режима ---
-        btn_shoot = _make_button("🔫", Vector2(1100, 380), Vector2(140, 140))
+        btn_shoot = _make_button("Огонь", Vector2(1100, 380), Vector2(140, 140))
         btn_shoot.pressed.connect(_on_shoot)
 
-        btn_jump = _make_button("⤒", Vector2(930, 560), Vector2(110, 110))
+        btn_jump = _make_button("Прыжок", Vector2(930, 560), Vector2(110, 110))
         btn_jump.pressed.connect(_on_jump)
 
         # --- Кнопки режима вождения ---
-        btn_gas = _make_button("🚀", Vector2(1150, 400), Vector2(120, 120))
+        btn_gas = _make_button("Газ", Vector2(1150, 400), Vector2(120, 120))
         btn_gas.button_down.connect(_on_gas_down)
         btn_gas.button_up.connect(_on_gas_up)
 
-        btn_brake = _make_button("🛑", Vector2(1150, 540), Vector2(120, 120))
+        btn_brake = _make_button("Тормоз", Vector2(1150, 540), Vector2(120, 120))
         btn_brake.button_down.connect(_on_brake_down)
         btn_brake.button_up.connect(_on_brake_up)
 
-        btn_left = _make_button("◀", Vector2(930, 590), Vector2(105, 105))
+        btn_left = _make_button("Влево", Vector2(930, 590), Vector2(105, 105))
         btn_left.button_down.connect(_on_left_down)
         btn_left.button_up.connect(_on_steer_up)
 
-        btn_right = _make_button("▶", Vector2(1045, 620), Vector2(105, 105))
+        btn_right = _make_button("Вправо", Vector2(1045, 620), Vector2(105, 105))
         btn_right.button_down.connect(_on_right_down)
         btn_right.button_up.connect(_on_steer_up)
 
         # --- Кнопка «сесть в машину / выйти» (видна всегда) ---
-        btn_car = _make_button("🚗", Vector2(1100, 230), Vector2(110, 110))
+        btn_car = _make_button("Машина", Vector2(1100, 230), Vector2(110, 110))
         btn_car.pressed.connect(_on_car)
 
     func _make_button(text: String, pos: Vector2, sz: Vector2) -> Button:
@@ -916,7 +923,7 @@ class GameHUD extends CanvasLayer:
         b.position = pos
         b.size = sz
         b.modulate = Color(1, 1, 1, 0.5)
-        b.add_theme_font_size_override("font_size", 34)
+        b.add_theme_font_size_override("font_size", 22)
         add_child(b)
         return b
 
@@ -927,13 +934,13 @@ class GameHUD extends CanvasLayer:
 
         # Здоровье и оружие
         health_bar.value = player.health
-        weapon_label.text = "🔫 ∞ (перезарядка)" if player.cooldown > 0.0 else "🔫 ∞"
+        weapon_label.text = "Перезарядка…" if player.cooldown > 0.0 else "Оружие: бесконечно"
 
         # Передаём вектор джойстика игроку
         player.mobile_move = joy.value
 
         # Показываем нужный набор кнопок
-        var driving := player.current_car != null
+        var driving: bool = player.current_car != null
         joy.visible = not driving
         btn_shoot.visible = not driving
         btn_jump.visible = not driving
