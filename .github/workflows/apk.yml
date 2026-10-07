@@ -1,7 +1,7 @@
 # Автосборка APK игры Mini GTA прямо в облаке GitHub.
 #
-# Что делает: ставит Java + Android SDK, скачивает Godot 4.3, собирает APK
-# и выкладывает готовый файл mini-gta.apk в раздел Releases.
+# Что делает: ставит Java и Android SDK, скачивает Godot 4.3 и шаблоны экспорта,
+# собирает APK и выкладывает готовый файл mini-gta.apk в раздел Releases.
 #
 # Как запустить: вкладка Actions -> "Сборка APK" -> Run workflow.
 # Или просто изменить любой файл игры — сборка стартует сама.
@@ -12,6 +12,11 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+
+# Если запустилось несколько сборок подряд — оставляем только последнюю
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -25,49 +30,62 @@ jobs:
       - name: Скачать код игры
         uses: actions/checkout@v4
 
-      # Java нужна сборщику Gradle
+      # Java нужна для подписи APK (keytool и apksigner)
       - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # Android SDK: платформа 34 и сборочные инструменты
+      # Ставим сами командные инструменты Android. Пакеты добавляем отдельным
+      # шагом через sdkmanager — так надёжнее, чем списком в параметрах.
       - name: Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
 
-      # NDK требуется сборочному скрипту Godot; если не поставится — Gradle скачает сам
-      - name: NDK
-        run: sdkmanager "ndk;23.2.8568313" || echo "NDK не установился, Gradle скачает его сам"
+      - name: Пакеты Android (build-tools нужны для подписи APK)
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "SDK: $ANDROID_SDK_ROOT"
+          ls "$ANDROID_SDK_ROOT/build-tools"
 
-      - name: Godot 4.3 и шаблоны экспорта
+      - name: Скачать Godot 4.3
         run: |
           set -e
           VER=4.3-stable
-          wget -q "https://github.com/godotengine/godot/releases/download/$VER/Godot_v${VER}_linux.x86_64.zip" -O godot.zip
+          curl -sSLo godot.zip "https://github.com/godotengine/godot/releases/download/${VER}/Godot_v${VER}_linux.x86_64.zip"
           unzip -q godot.zip
           mv "Godot_v${VER}_linux.x86_64" godot
           chmod +x godot
           ./godot --version
 
-          wget -q "https://github.com/godotengine/godot/releases/download/$VER/Godot_v${VER}_export_templates.tpz" -O templates.tpz
+      - name: Скачать шаблоны экспорта
+        run: |
+          set -e
+          VER=4.3-stable
+          curl -sSLo templates.tpz "https://github.com/godotengine/godot/releases/download/${VER}/Godot_v${VER}_export_templates.tpz"
           unzip -q templates.tpz -d tpl
           mkdir -p "$HOME/.local/share/godot/export_templates/4.3.stable"
           cp -r tpl/templates/. "$HOME/.local/share/godot/export_templates/4.3.stable/"
-          echo "Шаблоны:"; cat "$HOME/.local/share/godot/export_templates/4.3.stable/version.txt"
+          cat "$HOME/.local/share/godot/export_templates/4.3.stable/version.txt"
 
-      # Ключ отладочной подписи и пути к SDK/Java для Godot
-      - name: Ключ подписи и настройки Godot
+      # Отладочный ключ, которым подписывается APK
+      - name: Ключ подписи APK
         run: |
           set -e
           keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android \
             -keystore "$PWD/debug.keystore" -storepass android \
             -dname "CN=Android Debug,O=Android,C=US" -validity 9999 \
             -deststoretype pkcs12
+          ls -l debug.keystore
 
-          mkdir -p "$HOME/.config/godot"
+      # Godot берёт пути к SDK, Java и ключу из своих настроек редактора.
+      # Пишем файл сразу под два имени, чтобы версия Godot точно его увидела.
+      - name: Настройки Godot (пути к SDK и ключу)
+        run: |
+          set -e
+          SET="$HOME/.config/godot"
+          mkdir -p "$SET"
           {
             echo '[gd_resource type="EditorSettings" format=3]'
             echo ''
@@ -77,19 +95,19 @@ jobs:
             echo "export/android/debug_keystore = \"$PWD/debug.keystore\""
             echo 'export/android/debug_keystore_user = "androiddebugkey"'
             echo 'export/android/debug_keystore_pass = "android"'
-          } > "$HOME/.config/godot/editor_settings-4.tres"
-          cat "$HOME/.config/godot/editor_settings-4.tres"
+          } > "$SET/editor_settings-4.3.tres"
+          cp "$SET/editor_settings-4.3.tres" "$SET/editor_settings-4.tres"
+          cat "$SET/editor_settings-4.3.tres"
 
       - name: Импорт проекта
         run: ./godot --headless --path . --import || true
 
       - name: Сборка APK
-        run: ./godot --headless --path . --export-debug "Android" mini-gta.apk
+        run: |
+          ./godot --headless --path . --export-debug "Android" "$PWD/mini-gta.apk"
+          ls -lh mini-gta.apk
 
-      - name: Проверить, что файл создан
-        run: ls -lh mini-gta.apk
-
-      # Готовый APK появляется в разделе Releases — оттуда его удобно скачать на телефон
+      # Готовый APK появляется в разделе Releases — оттуда его удобно скачать
       - name: Выложить APK в Releases
         uses: softprops/action-gh-release@v2
         with:
