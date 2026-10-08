@@ -1,10 +1,15 @@
 # Автосборка APK игры Mini GTA прямо в облаке GitHub.
 #
-# Что делает: ставит Java 17 и Android SDK в облачную машину, качает Godot 4.3
-# с шаблонами экспорта, собирает APK и выкладывает файл mini-gta.apk в Releases.
+# Что делает: ставит Java 17, разворачивает Android SDK, качает Godot 4.3
+# с шаблонами экспорта, собирает APK и выкладывает mini-gta.apk в Releases.
 #
 # Запуск: вкладка Actions -> "Сборка APK" -> Run workflow.
 # Либо просто изменить любой файл игры — сборка стартует сама.
+#
+# ВАЖНО про изменения: раньше здесь использовалось действие
+# android-actions/setup-android@v3, но его sdkmanager падал с exit code 1
+# (и сборка обрывалась на первом же шаге). Теперь Android SDK
+# разворачивается готовыми архивами от Google — без sdkmanager.
 
 name: Сборка APK
 
@@ -33,61 +38,52 @@ jobs:
       - name: Скачать код игры
         uses: actions/checkout@v4
 
-      # Java нужна для подписи APK (keytool и apksigner)
+      # Java нужна для подписи APK (keytool и apksigner внутри build-tools)
       - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # Ставим командные инструменты Android (в них входит sdkmanager)
-      - name: Инструменты Android
-        uses: android-actions/setup-android@v3
-
-      # Ставим сам Android SDK в свою папку — так не будет проблем с правами.
-      # Сначала пробуем sdkmanager, если он не справился — берём архивы Google.
-      - name: Android SDK (build-tools нужны для подписи APK)
+      # Android SDK раскладываем вручную из официальных архивов Google.
+      # Так надёжнее: не зависим от sdkmanager и от того, что уже стоит на раннере.
+      - name: Android SDK (архивы Google)
         run: |
           set -e
           SDK="$HOME/android-sdk"
-          mkdir -p "$SDK"
-          export ANDROID_SDK_ROOT="$SDK"
+          mkdir -p "$SDK/build-tools" "$SDK/platforms" "$SDK/licenses"
 
-          yes | sdkmanager --sdk_root="$SDK" --licenses > /tmp/lic.log 2>&1 || true
-          sdkmanager --sdk_root="$SDK" "platform-tools" "platforms;android-34" "build-tools;34.0.0" > /tmp/sdk.log 2>&1 || true
+          echo "== build-tools 34.0.0 (в них apksigner и zipalign) =="
+          curl -sSLo /tmp/bt.zip "https://dl.google.com/android/repository/build-tools_r34-linux.zip"
+          unzip -q /tmp/bt.zip -d /tmp/bt
+          BT=$(ls -d /tmp/bt/android-* | head -1)
+          mv "$BT" "$SDK/build-tools/34.0.0"
+          chmod +x "$SDK/build-tools/34.0.0/bin/"* || true
 
-          if [ ! -d "$SDK/build-tools/34.0.0" ]; then
-            echo "sdkmanager не справился — качаем build-tools архивом от Google"
-            curl -sSLo /tmp/bt.zip "https://dl.google.com/android/repository/build-tools_r34-linux.zip"
-            unzip -q /tmp/bt.zip -d /tmp/bt
-            mkdir -p "$SDK/build-tools"
-            mv /tmp/bt/android-* "$SDK/build-tools/34.0.0"
-          fi
-          if [ ! -d "$SDK/platforms/android-34" ]; then
-            echo "Качаем платформу android-34 архивом от Google"
-            curl -sSLo /tmp/pf.zip "https://dl.google.com/android/repository/platform-34_r03.zip"
-            unzip -q /tmp/pf.zip -d /tmp/pf
-            mkdir -p "$SDK/platforms"
-            mv /tmp/pf/android-* "$SDK/platforms/android-34"
-          fi
-          chmod +x "$SDK/build-tools/34.0.0/"* 2>/dev/null || true
+          echo "== платформа android-34 =="
+          curl -sSLo /tmp/pf.zip "https://dl.google.com/android/repository/platform-34_r03.zip"
+          unzip -q /tmp/pf.zip -d /tmp/pf
+          PF=$(ls -d /tmp/pf/android-* | head -1)
+          mv "$PF" "$SDK/platforms/android-34"
 
-          # Лицензии SDK — чтобы инструменты не требовали подтверждения
-          mkdir -p "$SDK/licenses"
+          echo "== platform-tools =="
+          curl -sSLo /tmp/pt.zip "https://dl.google.com/android/repository/platform-tools-latest-linux.zip"
+          unzip -q /tmp/pt.zip -d /tmp/pt
+          mv /tmp/pt/platform-tools "$SDK/platform-tools"
+
+          # Принятые лицензии — чтобы инструменты не требовали подтверждения
           printf '\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n8933bad161af4178b1185d1a37fbf41ea5269c55\n' > "$SDK/licenses/android-sdk-license"
           printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
 
-          echo "=== Ошибки sdkmanager (если были) ==="
-          tail -5 /tmp/sdk.log || true
-          echo "=== Что стоит в SDK ==="
-          ls "$SDK" || true
-          ls "$SDK/build-tools" || true
-          ls "$SDK/platforms" || true
+          echo "== что получилось =="
+          ls "$SDK"
+          ls "$SDK/build-tools/34.0.0" | head -5
+          ls "$SDK/platforms/android-34" | head -5
 
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "$SDK/build-tools/34.0.0" >> "$GITHUB_PATH"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK/build-tools/34.0.0" >> "$GITHUB_PATH"
 
       - name: Скачать Godot 4.3
         run: |
@@ -105,8 +101,7 @@ jobs:
           unzip -q templates.tpz -d tpl
           mkdir -p "$HOME/.local/share/godot/export_templates/${TPL_VER}"
           cp -r tpl/templates/. "$HOME/.local/share/godot/export_templates/${TPL_VER}/"
-          echo "=== Шаблоны на месте ==="
-          ls "$HOME/.local/share/godot/export_templates/${TPL_VER}" | head -20
+          echo "== шаблоны на месте =="
           cat "$HOME/.local/share/godot/export_templates/${TPL_VER}/version.txt"
 
       # Отладочный ключ, которым подписывается APK
@@ -119,42 +114,47 @@ jobs:
             -deststoretype pkcs12
           ls -l debug.keystore
 
-      # Godot берёт пути к SDK, Java и ключу из своих настроек редактора.
-      # Поэтому сначала даём движку создать файл настроек, потом дописываем пути.
-      - name: Настройки Godot (пути к SDK и ключу)
+      # Godot берёт путь к Android SDK, JDK и ключу подписи из своих настроек.
+      # Пишем файл настроек сразу в двух именах — разные версии Godot ищут разное имя.
+      - name: Настройки Godot (пути к SDK, JDK и ключу)
         run: |
           set -e
-          timeout 150 ./godot --headless --editor --quit-after 3 > /tmp/godot_editor.log 2>&1 || true
+          mkdir -p "$HOME/.config/godot"
+          CFG="$HOME/.config/godot/editor_settings-4.tres"
+          {
+            echo '[gd_resource type="EditorSettings" format=3]'
+            echo ''
+            echo '[resource]'
+            echo "export/android/android_sdk_path = \"$ANDROID_SDK_ROOT\""
+            echo "export/android/java_sdk_path = \"$JAVA_HOME\""
+            echo "export/android/debug_keystore = \"$GITHUB_WORKSPACE/debug.keystore\""
+            echo 'export/android/debug_keystore_user = "androiddebugkey"'
+            echo 'export/android/debug_keystore_pass = "android"'
+          } > "$CFG"
+          cp "$CFG" "$HOME/.config/godot/editor_settings-4.3.tres"
+          echo "== настройки Godot =="
+          cat "$CFG"
 
-          SET=$(ls "$HOME/.config/godot/editor_settings-"*.tres 2>/dev/null | head -1 || true)
-          if [ -z "$SET" ]; then
-            SET="$HOME/.config/godot/editor_settings-4.3.tres"
-            mkdir -p "$HOME/.config/godot"
-          fi
-
-          python3 - "$SET" <<'PY'
-          import os, sys
-          path = sys.argv[1]
-          text = open(path).read() if os.path.exists(path) else ""
-          if "[gd_resource" not in text:
-              text = '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n' + text
-          elif "[resource]" not in text:
-              text += "\n[resource]\n"
-          keys = {
-              "export/android/android_sdk_path": os.environ.get("ANDROID_SDK_ROOT", ""),
-              "export/android/java_sdk_path": os.environ.get("JAVA_HOME", ""),
-              "export/android/debug_keystore": os.path.join(os.environ.get("GITHUB_WORKSPACE", ""), "debug.keystore"),
-              "export/android/debug_keystore_user": "androiddebugkey",
-              "export/android/debug_keystore_pass": "android",
-          }
-          for k, v in keys.items():
-              text += '%s = "%s"\n' % (k, v)
-          open(path, "w").write(text)
-          print("Настройки записаны в", path)
+      # Дублируем ключ подписи прямо в профиль экспорта — так сборка не зависит
+      # от того, прочитал ли Godot настройки. Заодно делаем версию сборки
+      # уникальной, чтобы новую сборку можно было ставить поверх старой.
+      - name: Прописать ключ подписи и версию в профиль экспорта
+        run: |
+          set -e
+          python3 - <<'PY'
+          import os
+          path = "export_presets.cfg"
+          text = open(path, encoding="utf-8").read()
+          ws = os.environ["GITHUB_WORKSPACE"]
+          run = os.environ["GITHUB_RUN_NUMBER"]
+          text = text.replace('keystore/debug=""', 'keystore/debug="%s/debug.keystore"' % ws)
+          text = text.replace('keystore/debug_user=""', 'keystore/debug_user="androiddebugkey"')
+          text = text.replace('keystore/debug_password=""', 'keystore/debug_password="android"')
+          text = text.replace('version/code=1', 'version/code=%s' % run)
+          open(path, "w", encoding="utf-8").write(text)
+          print("Профиль экспорта подготовлен, версия сборки:", run)
           PY
-
-          cp "$SET" "$HOME/.config/godot/editor_settings-4.tres"
-          cat "$HOME/.config/godot/editor_settings-4.tres"
+          grep -n "keystore/debug\|version/code" export_presets.cfg || true
 
       - name: Импорт проекта
         run: ./godot --headless --path . --import || true
@@ -163,7 +163,7 @@ jobs:
       - name: Сборка APK
         run: |
           set +e
-          ./godot --headless --verbose --path . --export-debug "Android" "$PWD/mini-gta.apk" > /tmp/export.log 2>&1
+          ./godot --headless --path . --export-debug "Android" "$PWD/mini-gta.apk" > /tmp/export.log 2>&1
           cat /tmp/export.log
           if [ ! -f "$PWD/mini-gta.apk" ]; then
             MSG=$(tail -c 700 /tmp/export.log | tr '\n' ' ')
@@ -199,9 +199,10 @@ jobs:
           echo "=== Хвост лога сборки ==="
           tail -40 /tmp/export.log 2>/dev/null || echo "лога сборки нет"
           echo "=== Шаблоны экспорта ==="
-          ls "$HOME/.local/share/godot/export_templates/" || true
           ls "$HOME/.local/share/godot/export_templates/${TPL_VER}" | head -20 || true
           echo "=== Android SDK ==="
           ls "$ANDROID_SDK_ROOT" || true
           ls "$ANDROID_SDK_ROOT/build-tools" || true
           ls "$ANDROID_SDK_ROOT/platforms" || true
+          echo "=== Профиль экспорта ==="
+          grep -n "keystore\|icon" export_presets.cfg || true
