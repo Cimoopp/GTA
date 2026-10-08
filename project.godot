@@ -1,5 +1,5 @@
 ; Настройки проекта "Mini GTA" (Godot 4.3+)
-; Игра собирается в APK для Android.
+; Игра собирается в APK для Android и в веб-версию (браузер телефона/ПК).
 config_version=5
 
 [application]
@@ -7,7 +7,8 @@ config_version=5
 config/name="Mini GTA"
 config/description="3D мини-GTA: ходьба, машины, стрельба, пешеходы, миникарта"
 run/main_scene="res://Main.tscn"
-config/features=PackedStringArray("4.3", "Mobile")
+; Рендерер Compatibility — работает и на Android, и в браузере (WebGL2).
+config/features=PackedStringArray("4.3", "GL Compatibility")
 config/icon="res://icon.svg"
 
 [display]
@@ -15,7 +16,7 @@ config/icon="res://icon.svg"
 ; Базовое разрешение интерфейса (масштабируется под любой экран)
 window/size/viewport_width=1280
 window/size/viewport_height=720
-; Экран телефона строго горизонтально (1 = landscape)
+; На телефоне экран строго горизонтально (1 = landscape)
 window/handheld/orientation=1
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
@@ -32,15 +33,16 @@ common/physics_ticks_per_second=60
 
 [rendering]
 
-; Мобильный рендерер — быстрее и легче для Android
-renderer/rendering_method="mobile"
-renderer/rendering_method.mobile="mobile"
+; Compatibility — единственный рендерер, который работает в браузере,
+; и самый лёгкий для телефонов.
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+renderer/rendering_method.web="gl_compatibility"
 anti_aliasing/quality/msaa_3d=0
 
 [debug]
 
-; Строгие предупреждения GDScript при сборке в облаке не должны
-; останавливать экспорт APK (0 = игнорировать).
+; Строгие предупреждения GDScript не должны останавливать сборку (0 = игнорировать).
 gdscript/warnings/inference_on_variant=0
 gdscript/warnings/unsafe_property_access=0
 gdscript/warnings/unsafe_method_access=0
