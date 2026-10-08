@@ -1,24 +1,13 @@
-# Автосборка APK игры Mini GTA прямо в облаке GitHub.
-#
-# Что делает: ставит Java 17, разворачивает Android SDK, качает Godot 4.3
-# с шаблонами экспорта, собирает APK и выкладывает mini-gta.apk в Releases.
-#
-# Запуск: вкладка Actions -> "Сборка APK" -> Run workflow.
-# Либо просто изменить любой файл игры — сборка стартует сама.
-#
-# ВАЖНО про изменения: раньше здесь использовалось действие
-# android-actions/setup-android@v3, но его sdkmanager падал с exit code 1
-# (и сборка обрывалась на первом же шаге). Теперь Android SDK
-# разворачивается готовыми архивами от Google — без sdkmanager.
-
 name: Сборка APK
 
+# Сборка запускается сама при любом изменении в main,
+# либо вручную кнопкой Run workflow на вкладке Actions.
 on:
-  workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main]
+  workflow_dispatch:
 
-# Если запустилось несколько сборок подряд — остаётся только последняя
+# Новая сборка отменяет предыдущую — не тратим время на устаревшие.
 concurrency:
   group: apk-${{ github.ref }}
   cancel-in-progress: true
@@ -26,183 +15,208 @@ concurrency:
 permissions:
   contents: write
 
-jobs:
-  build-apk:
-    name: Собрать mini-gta.apk
-    runs-on: ubuntu-latest
-    env:
-      GODOT_VER: 4.3-stable
-      TPL_VER: 4.3.stable
+env:
+  BT_VERSION: 34.0.0
 
+jobs:
+  build:
+    runs-on: ubuntu-latest
     steps:
       - name: Скачать код игры
         uses: actions/checkout@v4
 
-      # Java нужна для подписи APK (keytool и apksigner внутри build-tools)
       - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      # Android SDK раскладываем вручную из официальных архивов Google.
-      # Так надёжнее: не зависим от sdkmanager и от того, что уже стоит на раннере.
-      - name: Android SDK (архивы Google)
+      # ---------------------------------------------------------------
+      #  Android SDK ставим БЕЗ sdkmanager (он падал с exit code 1).
+      #  Качаем архивы Google, но имя файла не угадываем: берём его
+      #  из официального списка Google и проверяем, что это реально zip.
+      # ---------------------------------------------------------------
+      - name: Android build-tools (apksigner и zipalign)
         run: |
-          set -e
+          set -euo pipefail
           SDK="$HOME/android-sdk"
-          mkdir -p "$SDK/build-tools" "$SDK/platforms" "$SDK/licenses"
+          mkdir -p "$SDK/build-tools" "$SDK/platforms" "$SDK/platform-tools"
 
-          echo "== build-tools 34.0.0 (в них apksigner и zipalign) =="
-          curl -sSLo /tmp/bt.zip "https://dl.google.com/android/repository/build-tools_r34-linux.zip"
+          # Официальный список пакетов Android SDK
+          XML=/tmp/repository.xml
+          curl -fsSL -o "$XML" https://dl.google.com/android/repository/repository2-3.xml || true
+
+          # Точное имя архива build-tools 34 из списка Google
+          BT_NAME="$(grep -oE 'build-tools_r34[^"<]*linux\.zip' "$XML" 2>/dev/null | head -1 || true)"
+          if [ -z "$BT_NAME" ]; then
+            BT_NAME="build-tools_r34-linux.zip"
+          fi
+          echo "Архив build-tools: $BT_NAME"
+
+          curl -fL -o /tmp/bt.zip "https://dl.google.com/android/repository/$BT_NAME"
+          unzip -tq /tmp/bt.zip            # если это не zip — упадём с понятной ошибкой
+
+          rm -rf /tmp/bt && mkdir -p /tmp/bt
           unzip -q /tmp/bt.zip -d /tmp/bt
-          BT=$(ls -d /tmp/bt/android-* | head -1)
-          mv "$BT" "$SDK/build-tools/34.0.0"
-          chmod +x "$SDK/build-tools/34.0.0/bin/"* || true
+          # Внутри архива папка android-14, файлы apksigner/zipalign — в её корне
+          SRC="$(find /tmp/bt -maxdepth 1 -mindepth 1 -type d | head -1)"
+          cp -a "$SRC/." "$SDK/build-tools/$BT_VERSION/"
+          chmod +x "$SDK/build-tools/$BT_VERSION"/* 2>/dev/null || true
 
-          echo "== платформа android-34 =="
-          curl -sSLo /tmp/pf.zip "https://dl.google.com/android/repository/platform-34_r03.zip"
-          unzip -q /tmp/pf.zip -d /tmp/pf
-          PF=$(ls -d /tmp/pf/android-* | head -1)
-          mv "$PF" "$SDK/platforms/android-34"
+          echo "--- содержимое build-tools/$BT_VERSION ---"
+          ls -1 "$SDK/build-tools/$BT_VERSION" | head -30
+          # Жёсткая проверка: без apksigner APK не подписать
+          test -x "$SDK/build-tools/$BT_VERSION/apksigner"
+          test -x "$SDK/build-tools/$BT_VERSION/zipalign"
+          echo "OK: build-tools на месте"
 
-          echo "== platform-tools =="
-          curl -sSLo /tmp/pt.zip "https://dl.google.com/android/repository/platform-tools-latest-linux.zip"
-          unzip -q /tmp/pt.zip -d /tmp/pt
-          mv /tmp/pt/platform-tools "$SDK/platform-tools"
+      - name: Android platform (android-34)
+        run: |
+          set -uo pipefail
+          SDK="$HOME/android-sdk"
+          XML=/tmp/repository.xml
 
-          # Принятые лицензии — чтобы инструменты не требовали подтверждения
-          printf '\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n8933bad161af4178b1185d1a37fbf41ea5269c55\n' > "$SDK/licenses/android-sdk-license"
-          printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$SDK/licenses/android-sdk-preview-license"
+          CAND=""
+          if [ -f "$XML" ]; then
+            CAND="$(grep -oE 'platform-34[^"<]*\.zip' "$XML" | sort -u | head -5 || true)"
+          fi
+          # Плюс известные варианты на случай, если список не прочитался
+          CAND="$CAND platform-34_r02.zip platform-34-ext7_r02.zip platform-34-ext7_r03.zip platform-34-ext7_r05.zip"
 
-          echo "== что получилось =="
-          ls "$SDK"
-          ls "$SDK/build-tools/34.0.0" | head -5
-          ls "$SDK/platforms/android-34" | head -5
+          OK=0
+          for n in $CAND; do
+            echo "Пробуем $n"
+            if curl -fsSL -o /tmp/pf.zip "https://dl.google.com/android/repository/$n" \
+               && unzip -tq /tmp/pf.zip >/dev/null 2>&1; then
+              rm -rf /tmp/pf && mkdir -p /tmp/pf
+              unzip -q /tmp/pf.zip -d /tmp/pf
+              SRC="$(find /tmp/pf -maxdepth 1 -mindepth 1 -type d | head -1)"
+              mkdir -p "$SDK/platforms/android-34"
+              cp -a "$SRC/." "$SDK/platforms/android-34/"
+              echo "OK: платформа установлена из $n"
+              OK=1
+              break
+            fi
+          done
+          if [ "$OK" = "0" ]; then
+            echo "ВНИМАНИЕ: платформу android-34 не удалось скачать (сборке она может и не понадобиться)"
+          fi
+          ls -1 "$SDK/platforms" || true
 
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
-          echo "$SDK/build-tools/34.0.0" >> "$GITHUB_PATH"
+      - name: Android platform-tools
+        run: |
+          set -uo pipefail
+          SDK="$HOME/android-sdk"
+          if curl -fsSL -o /tmp/pt.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip \
+             && unzip -tq /tmp/pt.zip >/dev/null 2>&1; then
+            rm -rf /tmp/pt && mkdir -p /tmp/pt
+            unzip -q /tmp/pt.zip -d /tmp/pt
+            cp -a /tmp/pt/platform-tools/. "$SDK/platform-tools/"
+            echo "OK: platform-tools установлены"
+          else
+            echo "ВНИМАНИЕ: platform-tools не скачались (для сборки APK они не критичны)"
+          fi
 
+      # ---------------------------------------------------------------
+      #  Движок Godot 4.3 и шаблоны экспорта
+      # ---------------------------------------------------------------
       - name: Скачать Godot 4.3
         run: |
-          set -e
-          curl -sSLo godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VER}/Godot_v${GODOT_VER}_linux.x86_64.zip"
-          unzip -q godot.zip
-          mv "Godot_v${GODOT_VER}_linux.x86_64" godot
-          chmod +x godot
+          set -euo pipefail
+          curl -fL -o /tmp/godot.zip \
+            https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          unzip -tq /tmp/godot.zip
+          rm -rf /tmp/godot && mkdir -p /tmp/godot
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          cp /tmp/godot/Godot_v4.3-stable_linux.x86_64 ./godot
+          chmod +x ./godot
           ./godot --version
 
       - name: Скачать шаблоны экспорта
         run: |
-          set -e
-          curl -sSLo templates.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VER}/Godot_v${GODOT_VER}_export_templates.tpz"
-          unzip -q templates.tpz -d tpl
-          mkdir -p "$HOME/.local/share/godot/export_templates/${TPL_VER}"
-          cp -r tpl/templates/. "$HOME/.local/share/godot/export_templates/${TPL_VER}/"
-          echo "== шаблоны на месте =="
-          cat "$HOME/.local/share/godot/export_templates/${TPL_VER}/version.txt"
+          set -euo pipefail
+          curl -fL -o /tmp/templates.tpz \
+            https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          unzip -tq /tmp/templates.tpz
+          rm -rf /tmp/tpl && mkdir -p /tmp/tpl
+          unzip -q /tmp/templates.tpz -d /tmp/tpl
+          DEST="$HOME/.local/share/godot/export_templates/4.3.stable"
+          mkdir -p "$DEST"
+          cp -a /tmp/tpl/templates/. "$DEST/"
+          echo "--- шаблоны Android ---"
+          ls -1 "$DEST" | grep -i android
+          test -f "$DEST/android_debug.apk"
 
-      # Отладочный ключ, которым подписывается APK
       - name: Ключ подписи APK
         run: |
-          set -e
-          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android \
-            -keystore "$GITHUB_WORKSPACE/debug.keystore" -storepass android \
-            -dname "CN=Android Debug,O=Android,C=US" -validity 9999 \
-            -deststoretype pkcs12
-          ls -l debug.keystore
+          set -euo pipefail
+          keytool -genkeypair -v \
+            -keystore "$HOME/debug.keystore" \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+          ls -l "$HOME/debug.keystore"
 
-      # Godot берёт путь к Android SDK, JDK и ключу подписи из своих настроек.
-      # Пишем файл настроек сразу в двух именах — разные версии Godot ищут разное имя.
-      - name: Настройки Godot (пути к SDK, JDK и ключу)
+      - name: Настройки Godot (пути к SDK и ключу)
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p "$HOME/.config/godot"
-          CFG="$HOME/.config/godot/editor_settings-4.tres"
-          {
-            echo '[gd_resource type="EditorSettings" format=3]'
-            echo ''
-            echo '[resource]'
-            echo "export/android/android_sdk_path = \"$ANDROID_SDK_ROOT\""
-            echo "export/android/java_sdk_path = \"$JAVA_HOME\""
-            echo "export/android/debug_keystore = \"$GITHUB_WORKSPACE/debug.keystore\""
-            echo 'export/android/debug_keystore_user = "androiddebugkey"'
-            echo 'export/android/debug_keystore_pass = "android"'
-          } > "$CFG"
-          cp "$CFG" "$HOME/.config/godot/editor_settings-4.3.tres"
-          echo "== настройки Godot =="
-          cat "$CFG"
+          cat > /tmp/editor_settings.tres <<EOF
+[gd_resource type="EditorSettings" format=3]
 
-      # Дублируем ключ подписи прямо в профиль экспорта — так сборка не зависит
-      # от того, прочитал ли Godot настройки. Заодно делаем версию сборки
-      # уникальной, чтобы новую сборку можно было ставить поверх старой.
-      - name: Прописать ключ подписи и версию в профиль экспорта
-        run: |
-          set -e
-          python3 - <<'PY'
-          import os
-          path = "export_presets.cfg"
-          text = open(path, encoding="utf-8").read()
-          ws = os.environ["GITHUB_WORKSPACE"]
-          run = os.environ["GITHUB_RUN_NUMBER"]
-          text = text.replace('keystore/debug=""', 'keystore/debug="%s/debug.keystore"' % ws)
-          text = text.replace('keystore/debug_user=""', 'keystore/debug_user="androiddebugkey"')
-          text = text.replace('keystore/debug_password=""', 'keystore/debug_password="android"')
-          text = text.replace('version/code=1', 'version/code=%s' % run)
-          open(path, "w", encoding="utf-8").write(text)
-          print("Профиль экспорта подготовлен, версия сборки:", run)
-          PY
-          grep -n "keystore/debug\|version/code" export_presets.cfg || true
+[resource]
+export/android/android_sdk_path = "$HOME/android-sdk"
+export/android/java_sdk_path = "$JAVA_HOME"
+export/android/debug_keystore = "$HOME/debug.keystore"
+export/android/debug_keystore_user = "androiddebugkey"
+export/android/debug_keystore_pass = "android"
+EOF
+          # Godot ищет файл под разными именами в зависимости от версии — кладём оба
+          cp /tmp/editor_settings.tres "$HOME/.config/godot/editor_settings-4.tres"
+          cp /tmp/editor_settings.tres "$HOME/.config/godot/editor_settings-4.3.tres"
+          cat "$HOME/.config/godot/editor_settings-4.3.tres"
 
       - name: Импорт проекта
-        run: ./godot --headless --path . --import || true
+        run: |
+          set -uo pipefail
+          ./godot --headless --path . --import || true
 
-      # Основной шаг: сборка APK
       - name: Сборка APK
         run: |
-          set +e
-          ./godot --headless --path . --export-debug "Android" "$PWD/mini-gta.apk" > /tmp/export.log 2>&1
-          cat /tmp/export.log
-          if [ ! -f "$PWD/mini-gta.apk" ]; then
-            MSG=$(tail -c 700 /tmp/export.log | tr '\n' ' ')
-            echo "::error title=Сборка APK не удалась::$MSG"
-            exit 1
-          fi
-          ls -lh mini-gta.apk
+          set -euo pipefail
+          mkdir -p build
+          ./godot --headless --path . --export-debug "Android" build/mini-gta.apk
+          ls -la build
+          test -s build/mini-gta.apk
+          echo "РАЗМЕР APK: $(stat -c%s build/mini-gta.apk) байт"
+          head -c 2 build/mini-gta.apk | xxd | head -1
 
-      # Готовый APK появляется в разделе Releases — оттуда его удобно скачать
       - name: Выложить APK в Releases
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: apk-${{ github.run_number }}
-          name: "Mini GTA — сборка ${{ github.run_number }}"
-          body: |
-            Готовый APK игры Mini GTA.
+          tag_name: build-${{ github.run_number }}
+          name: Mini GTA — сборка ${{ github.run_number }}
+          body: "Автосборка APK из ветки main (коммит ${{ github.sha }})."
+          files: build/mini-gta.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            Как установить: скачай файл mini-gta.apk на телефон, открой его
-            и разреши установку из неизвестных источников.
-          files: mini-gta.apk
-
-      # Запасной вариант: APK сохраняется ещё и как артефакт сборки
       - name: Сохранить APK как артефакт
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mini-gta-apk
-          path: mini-gta.apk
+          path: build/mini-gta.apk
+          if-no-files-found: warn
 
-      # Если что-то упало — показываем причину прямо в логе сборки
-      - name: Что случилось (диагностика)
+      - name: Диагностика при ошибке
         if: failure()
         run: |
-          echo "=== Хвост лога сборки ==="
-          tail -40 /tmp/export.log 2>/dev/null || echo "лога сборки нет"
-          echo "=== Шаблоны экспорта ==="
-          ls "$HOME/.local/share/godot/export_templates/${TPL_VER}" | head -20 || true
-          echo "=== Android SDK ==="
-          ls "$ANDROID_SDK_ROOT" || true
-          ls "$ANDROID_SDK_ROOT/build-tools" || true
-          ls "$ANDROID_SDK_ROOT/platforms" || true
-          echo "=== Профиль экспорта ==="
-          grep -n "keystore\|icon" export_presets.cfg || true
+          echo "=== android-sdk ==="
+          find "$HOME/android-sdk" -maxdepth 3 | head -60
+          echo "=== настройки Godot ==="
+          cat "$HOME/.config/godot/editor_settings-4.3.tres" || true
+          echo "=== файлы проекта ==="
+          ls -la
