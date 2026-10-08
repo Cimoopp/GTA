@@ -1,22 +1,17 @@
 name: Сборка APK
 
-# Сборка запускается сама при любом изменении в main,
-# либо вручную кнопкой Run workflow на вкладке Actions.
+# Сборка запускается сама при изменении в main либо вручную кнопкой Run workflow.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# Новая сборка отменяет предыдущую — не тратим время на устаревшие.
 concurrency:
   group: apk-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: write
-
-env:
-  BT_VERSION: 34.0.0
 
 jobs:
   build:
@@ -32,90 +27,52 @@ jobs:
           java-version: '17'
 
       # ---------------------------------------------------------------
-      #  Android SDK ставим БЕЗ sdkmanager (он падал с exit code 1).
-      #  Качаем архивы Google, но имя файла не угадываем: берём его
-      #  из официального списка Google и проверяем, что это реально zip.
+      #  Раньше мы качали Android SDK архивами Google — именно там всё и
+      #  падало (sdkmanager с exit code 1, битые zip, неверные имена).
+      #  В образе ubuntu-latest Android SDK УЖЕ установлен вместе с
+      #  build-tools, platform-tools и принятыми лицензиями.
+      #  Берём его. Скачивание оставлено только как аварийный запасной путь.
       # ---------------------------------------------------------------
-      - name: Android build-tools (apksigner и zipalign)
+      - name: Android SDK (берём готовый из образа GitHub)
         run: |
           set -euo pipefail
-          SDK="$HOME/android-sdk"
-          mkdir -p "$SDK/build-tools" "$SDK/platforms" "$SDK/platform-tools"
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=${ANDROID_HOME:-нет}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-нет}"
+          echo "Использую SDK: $SDK"
 
-          # Официальный список пакетов Android SDK
-          XML=/tmp/repository.xml
-          curl -fsSL -o "$XML" https://dl.google.com/android/repository/repository2-3.xml || true
-
-          # Точное имя архива build-tools 34 из списка Google
-          BT_NAME="$(grep -oE 'build-tools_r34[^"<]*linux\.zip' "$XML" 2>/dev/null | head -1 || true)"
-          if [ -z "$BT_NAME" ]; then
-            BT_NAME="build-tools_r34-linux.zip"
-          fi
-          echo "Архив build-tools: $BT_NAME"
-
-          curl -fL -o /tmp/bt.zip "https://dl.google.com/android/repository/$BT_NAME"
-          unzip -tq /tmp/bt.zip            # если это не zip — упадём с понятной ошибкой
-
-          rm -rf /tmp/bt && mkdir -p /tmp/bt
-          unzip -q /tmp/bt.zip -d /tmp/bt
-          # Внутри архива папка android-14, файлы apksigner/zipalign — в её корне
-          SRC="$(find /tmp/bt -maxdepth 1 -mindepth 1 -type d | head -1)"
-          cp -a "$SRC/." "$SDK/build-tools/$BT_VERSION/"
-          chmod +x "$SDK/build-tools/$BT_VERSION"/* 2>/dev/null || true
-
-          echo "--- содержимое build-tools/$BT_VERSION ---"
-          ls -1 "$SDK/build-tools/$BT_VERSION" | head -30
-          # Жёсткая проверка: без apksigner APK не подписать
-          test -x "$SDK/build-tools/$BT_VERSION/apksigner"
-          test -x "$SDK/build-tools/$BT_VERSION/zipalign"
-          echo "OK: build-tools на месте"
-
-      - name: Android platform (android-34)
-        run: |
-          set -uo pipefail
-          SDK="$HOME/android-sdk"
-          XML=/tmp/repository.xml
-
-          CAND=""
-          if [ -f "$XML" ]; then
-            CAND="$(grep -oE 'platform-34[^"<]*\.zip' "$XML" | sort -u | head -5 || true)"
-          fi
-          # Плюс известные варианты на случай, если список не прочитался
-          CAND="$CAND platform-34_r02.zip platform-34-ext7_r02.zip platform-34-ext7_r03.zip platform-34-ext7_r05.zip"
-
-          OK=0
-          for n in $CAND; do
-            echo "Пробуем $n"
-            if curl -fsSL -o /tmp/pf.zip "https://dl.google.com/android/repository/$n" \
-               && unzip -tq /tmp/pf.zip >/dev/null 2>&1; then
-              rm -rf /tmp/pf && mkdir -p /tmp/pf
-              unzip -q /tmp/pf.zip -d /tmp/pf
-              SRC="$(find /tmp/pf -maxdepth 1 -mindepth 1 -type d | head -1)"
-              mkdir -p "$SDK/platforms/android-34"
-              cp -a "$SRC/." "$SDK/platforms/android-34/"
-              echo "OK: платформа установлена из $n"
-              OK=1
-              break
-            fi
-          done
-          if [ "$OK" = "0" ]; then
-            echo "ВНИМАНИЕ: платформу android-34 не удалось скачать (сборке она может и не понадобиться)"
-          fi
+          echo "=== каталоги SDK ==="
+          ls -1 "$SDK" || true
+          echo "=== build-tools ==="
+          ls -1 "$SDK/build-tools" || true
+          echo "=== platforms ==="
           ls -1 "$SDK/platforms" || true
 
-      - name: Android platform-tools
-        run: |
-          set -uo pipefail
-          SDK="$HOME/android-sdk"
-          if curl -fsSL -o /tmp/pt.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip \
-             && unzip -tq /tmp/pt.zip >/dev/null 2>&1; then
-            rm -rf /tmp/pt && mkdir -p /tmp/pt
-            unzip -q /tmp/pt.zip -d /tmp/pt
-            cp -a /tmp/pt/platform-tools/. "$SDK/platform-tools/"
-            echo "OK: platform-tools установлены"
-          else
-            echo "ВНИМАНИЕ: platform-tools не скачались (для сборки APK они не критичны)"
+          if [ ! -d "$SDK/build-tools" ] || [ -z "$(ls -1A "$SDK/build-tools" 2>/dev/null)" ]; then
+            echo "В образе нет build-tools — скачиваю архив Google (запасной путь)"
+            mkdir -p "$SDK/build-tools/34.0.0"
+            for n in build-tools_r34-linux.zip build-tools_r34.0.0-linux.zip; do
+              echo "Пробую $n"
+              if curl -fsSL -o /tmp/bt.zip "https://dl.google.com/android/repository/$n" \
+                 && unzip -tq /tmp/bt.zip >/dev/null 2>&1; then
+                rm -rf /tmp/bt && mkdir -p /tmp/bt
+                unzip -q /tmp/bt.zip -d /tmp/bt
+                SRC="$(find /tmp/bt -maxdepth 1 -mindepth 1 -type d | head -1)"
+                cp -a "$SRC/." "$SDK/build-tools/34.0.0/"
+                echo "OK: build-tools из $n"
+                break
+              fi
+            done
+            chmod +x "$SDK/build-tools/34.0.0"/* 2>/dev/null || true
           fi
+
+          echo "=== итог по build-tools ==="
+          ls -1 "$SDK/build-tools" || true
+          test -d "$SDK/build-tools" || { echo "ОШИБКА: build-tools отсутствуют"; exit 1; }
+          ls -1 "$SDK/platform-tools" >/dev/null 2>&1 || echo "ВНИМАНИЕ: нет platform-tools"
+
+          # Передаём путь дальше по шагам
+          echo "ANDROID_SDK=$SDK" >> "$GITHUB_ENV"
 
       # ---------------------------------------------------------------
       #  Движок Godot 4.3 и шаблоны экспорта
@@ -150,6 +107,7 @@ jobs:
       - name: Ключ подписи APK
         run: |
           set -euo pipefail
+          rm -f "$HOME/debug.keystore"
           keytool -genkeypair -v \
             -keystore "$HOME/debug.keystore" \
             -storepass android -keypass android \
@@ -158,7 +116,7 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
           ls -l "$HOME/debug.keystore"
 
-      - name: Настройки Godot (пути к SDK и ключу)
+      - name: Настройки Godot (путь к SDK и ключ)
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/godot"
@@ -166,16 +124,23 @@ jobs:
 [gd_resource type="EditorSettings" format=3]
 
 [resource]
-export/android/android_sdk_path = "$HOME/android-sdk"
-export/android/java_sdk_path = "$JAVA_HOME"
-export/android/debug_keystore = "$HOME/debug.keystore"
+export/android/android_sdk_path = "${ANDROID_SDK}"
+export/android/java_sdk_path = "${JAVA_HOME}"
+export/android/debug_keystore = "${HOME}/debug.keystore"
 export/android/debug_keystore_user = "androiddebugkey"
 export/android/debug_keystore_pass = "android"
 EOF
-          # Godot ищет файл под разными именами в зависимости от версии — кладём оба
           cp /tmp/editor_settings.tres "$HOME/.config/godot/editor_settings-4.tres"
           cp /tmp/editor_settings.tres "$HOME/.config/godot/editor_settings-4.3.tres"
           cat "$HOME/.config/godot/editor_settings-4.3.tres"
+
+          # Подстраховка: прописываем тот же ключ и в самом профиле экспорта
+          sed -i "s|^keystore/debug=.*|keystore/debug=\"${HOME}/debug.keystore\"|" export_presets.cfg
+          sed -i "s|^keystore/debug_user=.*|keystore/debug_user=\"androiddebugkey\"|" export_presets.cfg
+          sed -i "s|^keystore/debug_password=.*|keystore/debug_password=\"android\"|" export_presets.cfg
+          # Номер версии в APK = номер сборки
+          sed -i "s|^version/code=.*|version/code=${{ github.run_number }}|" export_presets.cfg
+          grep -n "^keystore/" export_presets.cfg
 
       - name: Импорт проекта
         run: |
@@ -190,7 +155,6 @@ EOF
           ls -la build
           test -s build/mini-gta.apk
           echo "РАЗМЕР APK: $(stat -c%s build/mini-gta.apk) байт"
-          head -c 2 build/mini-gta.apk | xxd | head -1
 
       - name: Выложить APK в Releases
         if: success()
@@ -214,9 +178,12 @@ EOF
       - name: Диагностика при ошибке
         if: failure()
         run: |
-          echo "=== android-sdk ==="
-          find "$HOME/android-sdk" -maxdepth 3 | head -60
+          echo "=== android sdk ==="
+          SDK="${ANDROID_SDK:-/usr/local/lib/android/sdk}"
+          ls -1 "$SDK" || true
+          ls -1 "$SDK/build-tools" || true
           echo "=== настройки Godot ==="
           cat "$HOME/.config/godot/editor_settings-4.3.tres" || true
           echo "=== файлы проекта ==="
           ls -la
+          ls -la build 2>/dev/null || true
